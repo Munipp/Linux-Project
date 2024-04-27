@@ -1,0 +1,309 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <string.h>
+#include <errno.h>
+
+#define BUFFER_SIZE 512
+#define BUFFER_SIZE_SMALL 128
+#define DEFAULT_FILE_NAME "inventory.txt"
+#define OPEN_MODE_READ_PLUS "r+"
+#define OPEN_MODE_WRITE_PLUS "w+"
+
+
+void* link_thread_open();
+void* link_thread_read();
+void* link_thread_write();
+void* link_thread_update();
+void* link_thread_close();
+void* link_thread_client();
+enum KernelFunction {
+    OP_READ = 'read',
+    OP_WRITE = 'write',
+    OP_UPDATE = 'update',
+    OP_OPEN = 'open',
+    OP_CLOSE = 'close',
+    OP_EXIT = 'exit'
+};
+
+enum UpdateType {
+    UP_UPDATE = 0,
+    UP_ADD,
+    UP_DELETE
+};
+
+
+typedef struct {
+    enum KernelFunction type;
+    char* write_content;
+    enum UpdateType update_type;
+    char* updating_field;
+    char* updating_item_name;
+    char* updating_field_new_value;
+    char* add_item_name;
+    char* add_item_price;
+    char* add_item_quantity;
+    char* deleting_item_name;
+} Command;
+
+char command[BUFFER_SIZE];
+Command command_common;
+sem_t serv_sem, cli_sem, read_sem, update_sem, open_sem, write_sem, close_sem;
+FILE* file_p;
+
+char *sliceString(char *str, int start, int end);
+char* get_new_item_entry_content();
+void parse_command();
+
+int main() {
+
+    sem_init(&serv_sem, 0, 0); 
+    sem_init(&cli_sem, 0, 0);
+    sem_init(&read_sem, 0, 0);
+    sem_init(&write_sem, 0, 0);
+    sem_init(&update_sem, 0, 0);
+    sem_init(&open_sem, 0, 0);
+    sem_init(&close_sem, 0, 0);
+
+
+    pthread_t thread_read, thread_write, thread_update, thread_open, thread_close;
+    pthread_create(&thread_read, NULL, link_thread_read, NULL);
+    pthread_create(&thread_write, NULL, link_thread_write, NULL);
+    pthread_create(&thread_update, NULL, link_thread_update, NULL);
+    pthread_create(&thread_open, NULL, link_thread_open, NULL);
+    pthread_create(&thread_close, NULL, link_thread_close, NULL);
+    pthread_t thread_client;
+    pthread_create(&thread_client, NULL, link_thread_client, NULL);
+    sem_post(&cli_sem); 
+    while (1) {
+        int r = sem_wait(&serv_sem);
+        parse_command(); 
+        switch (command_common.type) {
+            case OP_READ:
+                sem_post(&read_sem);
+                break;
+            case OP_WRITE:
+                sem_post(&write_sem);
+                break;
+            case OP_UPDATE:
+                sem_post(&update_sem);
+                break;
+            case OP_OPEN:
+                sem_post(&open_sem);
+                break;
+            case OP_CLOSE:
+                sem_post(&close_sem);
+                break;
+            case OP_EXIT:
+
+                pthread_cancel(thread_client);
+                pthread_cancel(thread_read);
+                pthread_cancel(thread_write);
+                pthread_cancel(thread_update);
+                pthread_cancel(thread_open);
+                pthread_cancel(thread_close);
+                
+                sem_destroy(&serv_sem);
+                sem_destroy(&cli_sem);
+                sem_destroy(&read_sem);
+                sem_destroy(&write_sem);
+                sem_destroy(&update_sem);
+                sem_destroy(&open_sem);
+                sem_destroy(&close_sem);
+
+                exit(0);
+            default:
+                printf("Invalid command: %s", command_common.type);
+                exit(2);
+        }
+        sem_wait(&serv_sem); 
+        sem_post(&cli_sem); 
+    }
+    return 0;
+}
+
+void parse_command() {
+    if (strncmp(command, "open", 4) == 0) {
+        command_common.type = OP_OPEN;
+    } else if (strncmp(command, "close", 4) == 0) {
+        command_common.type = OP_CLOSE;
+    } else if (strncmp(command, "write", 5) == 0) {
+        command_common.type = OP_WRITE;
+        command_common.write_content = sliceString(command, 5, strlen(command));
+    } else if (strncmp(command, "read", 4) == 0) {
+        command_common.type = OP_READ;
+    } else if(strncmp(command, "add", 3) == 0) {
+        char* splitted_command_name = strtok(command, " ");
+        command_common.type = OP_UPDATE;
+        command_common.update_type = UP_ADD;
+        command_common.add_item_name = strtok(0, " ");
+        command_common.add_item_price = strtok(0, " ");
+        command_common.add_item_quantity = strtok(0, " ");
+    } else if(strncmp(command, "delete", 6) == 0) {
+        char* splitted_command_name = strtok(command, " ");
+
+        command_common.type = OP_UPDATE;
+        command_common.update_type = UP_DELETE;
+        command_common.deleting_item_name = strtok(0, " ");
+    } else if(strncmp(command, "update", 6) == 0) {
+        char* splitted_command_name = strtok(command, " ");
+
+        command_common.type = OP_UPDATE;
+        command_common.update_type = UP_UPDATE;
+        command_common.updating_item_name = strtok(0, " ");
+        command_common.updating_field = strtok(0, " ");
+        command_common.updating_field_new_value = strtok(0, " ");
+    } else if (strncmp(command, "exit", 4) == 0) {
+        command_common.type = OP_EXIT;
+    } else {
+        printf("Invalid command");
+        exit(1);
+    }
+}
+
+char *sliceString(char *str, int start, int end)
+{
+    int i;
+    int size = (end - start) + 2;
+    char *output = (char *)malloc(size * sizeof(char));
+
+    for (i = 0; start <= end; start++, i++)
+    {
+        output[i] = str[start];
+    }
+
+    output[size] = '\0';
+
+    return output;
+}
+
+void* link_thread_client() {
+    while (1) {
+        sem_wait(&cli_sem); 
+        printf("\nExample commands:\n");
+        printf("Open the file: open\n");
+        printf("Close the file: close\n");
+        printf("Read the file: read\n");
+        printf("Add new entry: add item_name item_price item_quantity\n");
+        printf("Delete an entry: delete deleting_item_name\n");
+        printf("Update an entry: update tem_name updating_field: price or quantity new_value\n\n");
+
+        printf("Please enter the command you want to execute: ");
+        gets(&command);
+        sem_post(&serv_sem);
+    }
+}
+
+void* link_thread_write() {
+    while (1) {
+        sem_wait(&write_sem); 
+        file_p = fopen(DEFAULT_FILE_NAME, OPEN_MODE_WRITE_PLUS);
+        if (file_p == NULL) {
+            printf("Unable to open file.");
+        } else {
+            fprintf(file_p, "%s\n", command_common.write_content);
+            fclose(file_p); 
+        }
+
+        sem_post(&serv_sem);
+    }
+}
+
+void* link_thread_open() {
+    while (1) {
+        sem_wait(&open_sem); 
+    
+        file_p = fopen(DEFAULT_FILE_NAME, OPEN_MODE_READ_PLUS);
+
+        if (file_p == NULL) {
+            printf("Unable to open file. Code: %d\n", errno);
+        } else {
+            printf("File opened.\n");
+            fclose(file_p); 
+        }
+        sem_post(&serv_sem); 
+    }
+}
+void* link_thread_read() {
+    while (1) {
+        sem_wait(&read_sem); 
+
+        FILE* fp = fopen(DEFAULT_FILE_NAME, OPEN_MODE_READ_PLUS);
+
+        if (fp == NULL) {
+            printf("Couldn't open file!");
+        } else {
+            char buffer[BUFFER_SIZE];
+
+
+            while (fgets(buffer, BUFFER_SIZE, fp) != NULL) {
+                printf("%s", buffer);
+            }
+        }
+        sem_post(&serv_sem); 
+    }
+}
+void* link_thread_update() {
+    while (1) {
+        sem_wait(&update_sem); 
+        char commandStr[1024];
+        if (command_common.update_type == UP_UPDATE) {
+            sprintf(
+                commandStr, 
+                "awk -v OPERATION_TYPE='update' -v ITEM_NAME='%s' -v UPDATE_TYPE='%s' -v NEW_VALUE='%s' -f ./update.awk %s",
+                command_common.updating_item_name,
+                command_common.updating_field,
+                command_common.updating_field_new_value,
+                DEFAULT_FILE_NAME
+            );
+        } else if (command_common.update_type == UP_ADD) {
+            sprintf(
+                commandStr, 
+                "echo \"%s\t%s\t%s\" >> %s",
+                command_common.add_item_name,
+                command_common.add_item_price,
+                command_common.add_item_quantity,
+                DEFAULT_FILE_NAME
+            );
+        } else if (command_common.update_type == UP_DELETE) {
+            sprintf(
+                commandStr, 
+                "awk -v OPERATION_TYPE='delete' -v ITEM_NAME='%s' -f ./update.awk %s",
+                command_common.deleting_item_name,
+                DEFAULT_FILE_NAME
+            );
+        }
+        int ret = system(commandStr);
+        if(ret != 0) {
+            fprintf(stderr, "AWK script execution failed\n");
+        }
+        sem_post(&serv_sem);
+    }
+}
+
+char* get_new_item_entry_content() {
+    char* item_row = (char*)malloc(
+        strlen(command_common.add_item_name) +
+        strlen(command_common.add_item_price) +
+        strlen(command_common.add_item_quantity) +
+        2 + // for 2 \t characters
+        1 // null terminator
+    );
+    strcat(item_row, command_common.add_item_name);
+    strcat(item_row, "\t");
+    strcat(item_row, command_common.add_item_price);
+    strcat(item_row, "\t");
+    strcat(item_row, command_common.add_item_quantity);
+    return item_row;
+}
+void* link_thread_close() {
+    while (1) {
+        sem_wait(&close_sem); 
+        if (file_p == NULL) {
+        } else {
+            fclose(file_p);
+        }
+        sem_post(&serv_sem); 
+    }
+}

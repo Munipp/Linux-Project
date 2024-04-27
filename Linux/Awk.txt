@@ -1,0 +1,42 @@
+BEGIN {
+    FS = OFS = "\t"
+}
+
+function update_inventory(old_name, update_type, new_value) {
+    for(i = 0; i <= NR; i++) {
+        for(j = 0; j <= NF; j++) {
+            if ($j == old_name) {
+                if (update_type == "price") {
+                    $(j+1) = new_value
+                }
+                if (update_type == "quantity") {
+                    $(j+2) = new_value
+                }
+            }
+        }
+    }
+}
+
+function delete_inventory(name) {
+    for(i=1; i<=NR; i++) {
+        for(j = 0; j <= NF; j++) {
+            if ($j == name) {
+                $0 = ""  # Set the whole line to empty
+                return
+            }
+        }
+    }
+}
+
+{
+    if (OPERATION_TYPE == "update") {
+        update_inventory(ITEM_NAME, UPDATE_TYPE, NEW_VALUE)
+        print > FILENAME
+    }
+    if (OPERATION_TYPE == "delete") {
+        delete_inventory(ITEM_NAME)
+        if (NF) {
+            print > FILENAME
+        }
+    }
+}
